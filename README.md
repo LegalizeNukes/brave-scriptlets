@@ -14,7 +14,7 @@ Users who wish to verify the integrity or behavior of a scriptlet before running
 - Use an LLM to explain or reconstruct the script's logic
 - Manually inspect the script themselves
 
-**⚠️ Always review third-party code before executing it in your browser environment. ⚠️**
+**⚠️   Always review third-party code before executing it in your browser environment.   ⚠️**
 
 ## Usage
 
