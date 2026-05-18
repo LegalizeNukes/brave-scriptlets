@@ -6,7 +6,7 @@ These scriptlets are designed to replace common browser extensions with minimal 
 
 ## Disclaimer
 
-All scriptlets in this repository are minified/compactified to comply with the [character limits]([https://gitflic.ru/project/magnolia1234/bypass-paywalls-clean-filters](https://github.com/brave/brave-browser/issues/47769)) imposed by Brave Browser's Custom Scriptlets feature. As a result, the distributed code may not be easily human-readable.
+All scriptlets in this repository are minified/compactified to comply with the [character limits](https://github.com/brave/brave-browser/issues/47769) imposed by Brave Browser's Custom Scriptlets feature. As a result, the distributed code may not be easily human-readable.
 
 Users who wish to verify the integrity or behavior of a scriptlet before running it may:
 
