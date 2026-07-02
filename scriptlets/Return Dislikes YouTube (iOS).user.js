@@ -2,15 +2,6 @@
 // @name         Return Dislikes YouTube
 // @match        https://*.youtube.com/*
 // ==/UserScript==
-// -----------------------------------------------------------------------------
-// Return Dislikes YouTube
-// -----------------------------------------------------------------------------
-// Fetches dislike counts from the Return YouTube Dislike API and inserts them
-// into YouTube mobile/desktop UI elements.
-//
-// Comment/formatting pass only: the userscript metadata above is preserved
-// exactly as provided.
-
 (function () {
   "use strict";
   const A = "https://returnyoutubedislikeapi.com/votes?videoId=",
