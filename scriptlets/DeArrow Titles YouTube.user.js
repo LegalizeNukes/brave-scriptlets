@@ -2,14 +2,6 @@
 // @name         Dearrow Titles YouTube
 // @match        https://*.youtube.com/*
 // ==/UserScript==
-// -----------------------------------------------------------------------------
-// DeArrow Titles YouTube
-// -----------------------------------------------------------------------------
-// Looks up crowdsourced DeArrow titles and replaces matching YouTube link/page
-// titles where safe.
-//
-// Comment/formatting pass only: the userscript metadata above is preserved
-// exactly as provided.
 
 (() => {
   "use strict";
