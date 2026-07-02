@@ -2,14 +2,6 @@
 // @name         Redirect Google Maps
 // @match        https://*.google.com/maps*
 // ==/UserScript==
-// -----------------------------------------------------------------------------
-// Redirect Google Maps
-// -----------------------------------------------------------------------------
-// Extracts coordinates from Google Maps URLs and redirects them to Apple Maps.
-//
-// Comment/formatting pass only: the userscript metadata above is preserved
-// exactly as provided.
-
 (() => {
   "use strict";
   const MAX_WAIT_MS = 30_000;
