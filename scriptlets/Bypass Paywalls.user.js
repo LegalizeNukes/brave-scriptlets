@@ -466,15 +466,6 @@
 // @match        https://*.yogajournal.com/*
 // @match        https://*.yorkshirepost.co.uk/*
 // ==/UserScript==
-// -----------------------------------------------------------------------------
-// Bypass Paywalls
-// -----------------------------------------------------------------------------
-// Contains site-specific DOM cleanup, AMP/archive helpers, and article extraction
-// utilities.
-//
-// Comment/formatting pass only: the userscript metadata above is preserved
-// exactly as provided.
-
 var func_post,
   domain,
   csDoneOnce,
