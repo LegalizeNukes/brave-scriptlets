@@ -2,7 +2,6 @@
 // @name         Dearrow Titles YouTube
 // @match        https://*.youtube.com/*
 // ==/UserScript==
-
 (() => {
   "use strict";
   const API = "https://sponsor.ajay.app",
