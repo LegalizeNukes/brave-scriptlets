@@ -2,15 +2,6 @@
 // @name         SponsorBlock YouTube
 // @match        https://*.youtube.com/*
 // ==/UserScript==
-// -----------------------------------------------------------------------------
-// SponsorBlock YouTube
-// -----------------------------------------------------------------------------
-// Watches YouTube navigation/video lifecycle events, loads SponsorBlock segments,
-// and skips selected segment categories during playback.
-//
-// Comment/formatting pass only: the userscript metadata above is preserved
-// exactly as provided.
-
 (function () {
   "use strict";
   const C = [
