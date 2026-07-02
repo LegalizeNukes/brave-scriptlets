@@ -4,16 +4,6 @@ Lightweight userscripts for Brave Browser’s Custom Scriptlets feature. Also co
 
 These scriptlets are designed to replace common browser extensions with minimal overhead and zero configuration.
 
-## Disclaimer
-
-All scriptlets in this repository are minified/compactified to comply with the [character limits](https://github.com/brave/brave-browser/issues/47769) imposed by Brave Browser's Custom Scriptlets feature. As a result, the distributed code may not be easily human-readable.
-
-Users who wish to verify the integrity or behavior of a scriptlet before running it may:
-
-- Use a JavaScript beautifier or formatter to de-minify the code
-- Use an LLM to explain or reconstruct the script's logic
-- Manually inspect the script themselves
-
 **⚠️ Always review third-party code before executing it in your browser environment. ⚠️**
 
 ## Usage
@@ -68,6 +58,25 @@ Then paste the following into the **Create Custom Filters** box:
 
 ```js
 google.com##+js(user-redirect-google-maps.js)
+```
+## DeArrow Titles
+
+*Adapted from [DeArrow](https://github.com/ajayyy/DeArrow)*
+
+Replaces YouTube video titles with crowdsourced ones that are more accurate and reduce sensationalism.
+
+### Setup
+
+Create the scriptlet as:
+
+```txt
+user-dearrow-titles-youtube.user.js
+```
+
+Then paste the following into the **Create Custom Filters** box:
+
+```js
+youtube.com##+js(user-dearrow-titles-youtube.js)
 ```
 
 ## Return YouTube Dislikes
