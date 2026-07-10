@@ -2,180 +2,238 @@
 // @name         Redirect Google Maps
 // @match        https://*.google.com/maps*
 // ==/UserScript==
-
 (() => {
-    "use strict";
+    'use strict';
 
-    // -------------------------------------------------------------------------
-    // Coordinate patterns found in Google Maps URLs.
-    // Priority:
-    //   1. !3dLAT!4dLON  (actual place coordinates)
-    //   2. @LAT,LON      (viewport center)
-    //   3. q= / ll=      (query coordinates)
-    // -------------------------------------------------------------------------
+    const RE_AT =
+        /@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/;
 
-    const RE_AT    = /@(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/;
-    const RE_Q_LL  = /[?&](?:q|ll)=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/;
-    const RE_3D4D  = /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/;
+    const RE_Q_LL =
+        /[?&](?:q|ll)=(-?\d+(?:\.\d+)?),(-?\d+(?:\.\d+)?)/;
+
+    const RE_3D4D =
+        /!3d(-?\d+(?:\.\d+)?)!4d(-?\d+(?:\.\d+)?)/;
+
+    const POLL_INTERVAL = 500;
+    const MAX_LIFETIME = 120000;
+
+    const originalPushState = history.pushState;
+    const originalReplaceState = history.replaceState;
 
     let done = false;
-    let observer = null;
-    let interval = null;
+    let checkQueued = false;
+    let intervalId = 0;
+    let timeoutId = 0;
 
-    // -------------------------------------------------------------------------
-    // Validate parsed coordinates.
-    // Reject Google's temporary 0,0 placeholder.
-    // -------------------------------------------------------------------------
+    function isValidCoordinate(lat, lon) {
+        return (
+            Number.isFinite(lat) &&
+            Number.isFinite(lon) &&
+            !(lat === 0 && lon === 0) &&
+            lat >= -90 &&
+            lat <= 90 &&
+            lon >= -180 &&
+            lon <= 180
+        );
+    }
 
-    const isValid = (lat, lon) =>
-        Number.isFinite(lat) &&
-        Number.isFinite(lon) &&
-        !(lat === 0 && lon === 0) &&
-        lat >= -90 && lat <= 90 &&
-        lon >= -180 && lon <= 180;
+    function makeCoordinate(latValue, lonValue) {
+        const lat = Number(latValue);
+        const lon = Number(lonValue);
 
-    const makeCoord = (lat, lon) => {
-        lat = +lat;
-        lon = +lon;
-        return isValid(lat, lon) ? { lat, lon } : null;
-    };
+        return isValidCoordinate(lat, lon)
+            ? { lat, lon }
+            : null;
+    }
 
-    // -------------------------------------------------------------------------
-    // Extract coordinates from the current Google Maps URL.
-    // -------------------------------------------------------------------------
-
-    const parseCoords = href => {
+    function parseCoordinates(href) {
         const match =
             RE_3D4D.exec(href) ||
             RE_AT.exec(href) ||
             RE_Q_LL.exec(href);
 
-        return match ? makeCoord(match[1], match[2]) : null;
-    };
+        return match
+            ? makeCoordinate(match[1], match[2])
+            : null;
+    }
 
-    // -------------------------------------------------------------------------
-    // Extract the place name from:
-    // /maps/place/PLACE_NAME,...
-    //
-    // Only keep the business/location name itself.
-    // -------------------------------------------------------------------------
+    function getPlaceName(href) {
+        const match =
+            /\/maps\/place\/([^/@?]+)/.exec(href);
 
-    const placeNameFrom = href => {
-        const match = /\/maps\/place\/([^/@?]+)/.exec(href);
-        if (!match) return null;
+        if (!match) {
+            return null;
+        }
 
-        const name = decodeURIComponent(
-            match[1].replace(/\+/g, " ")
-        ).trim();
+        try {
+            const name = decodeURIComponent(
+                match[1].replace(/\+/g, ' ')
+            ).trim();
 
-        return name.split(",")[0].trim() || null;
-    };
+            return (
+                name.split(',')[0].trim() ||
+                null
+            );
+        } catch (_) {
+            return null;
+        }
+    }
 
-    // -------------------------------------------------------------------------
-    // Build Apple Maps URL.
-    //
-    // If a place name exists:
-    //   - exact coordinates determine the location
-    //   - place name becomes the pin title
-    //
-    // Otherwise:
-    //   - coordinates are used for both.
-    // -------------------------------------------------------------------------
+    function buildAppleMapsUrl(href, lat, lon) {
+        const coordinates = `${lat},${lon}`;
 
-    const appleUrlFor = (lat, lon) => {
-        const ll = `${lat},${lon}`;
-        const name = placeNameFrom(location.href) || ll;
+        const label =
+            getPlaceName(href) ||
+            coordinates;
 
-        return `maps://?ll=${encodeURIComponent(ll)}&q=${encodeURIComponent(name)}`;
-    };
+        return (
+            `maps://?ll=${encodeURIComponent(coordinates)}` +
+            `&q=${encodeURIComponent(label)}`
+        );
+    }
 
-    // -------------------------------------------------------------------------
-    // Save original History API methods.
-    // Google Maps updates the URL without reloading the page.
-    // -------------------------------------------------------------------------
+    function stop() {
+        if (done) {
+            return;
+        }
 
-    const originalPushState = history.pushState;
-    const originalReplaceState = history.replaceState;
-
-    const onUrlChange = () => queueMicrotask(tryRedirect);
-
-    // -------------------------------------------------------------------------
-    // Cleanup.
-    // -------------------------------------------------------------------------
-
-    const stop = () => {
         done = true;
+        checkQueued = false;
 
+        window.removeEventListener(
+            'popstate',
+            scheduleCheck
+        );
+
+        window.removeEventListener(
+            'hashchange',
+            scheduleCheck
+        );
+
+        // Restore History methods only if our wrappers are
+        // still installed. This avoids overwriting another
+        // script that may have wrapped them later.
         try {
-            window.removeEventListener("popstate", onUrlChange);
-            window.removeEventListener("hashchange", onUrlChange);
-        } catch {}
+            if (
+                history.pushState ===
+                wrappedPushState
+            ) {
+                history.pushState =
+                    originalPushState;
+            }
 
-        try {
-            history.pushState = originalPushState;
-            history.replaceState = originalReplaceState;
-        } catch {}
+            if (
+                history.replaceState ===
+                wrappedReplaceState
+            ) {
+                history.replaceState =
+                    originalReplaceState;
+            }
+        } catch (_) {}
 
-        try {
-            observer?.disconnect();
-        } catch {}
+        if (intervalId) {
+            clearInterval(intervalId);
+            intervalId = 0;
+        }
 
-        try {
-            clearInterval(interval);
-        } catch {}
+        if (timeoutId) {
+            clearTimeout(timeoutId);
+            timeoutId = 0;
+        }
+    }
 
-        observer = null;
-        interval = null;
-    };
+    function tryRedirect() {
+        if (done) {
+            return;
+        }
 
-    // -------------------------------------------------------------------------
-    // Attempt redirect once valid coordinates become available.
-    // -------------------------------------------------------------------------
+        // Use one URL snapshot for the entire redirect attempt.
+        const href = location.href;
 
-    const tryRedirect = () => {
-        if (done) return;
+        const coordinates =
+            parseCoordinates(href);
 
-        const coords = parseCoords(location.href);
-        if (!coords) return;
+        if (!coordinates) {
+            return;
+        }
+
+        const target = buildAppleMapsUrl(
+            href,
+            coordinates.lat,
+            coordinates.lon
+        );
 
         stop();
-        location.replace(appleUrlFor(coords.lat, coords.lon));
-    };
 
-    // -------------------------------------------------------------------------
-    // Watch History API navigation.
-    // -------------------------------------------------------------------------
+        location.replace(target);
+    }
 
-    history.pushState = function (...args) {
-        const result = originalPushState.apply(this, args);
-        onUrlChange();
+    function scheduleCheck() {
+        if (done || checkQueued) {
+            return;
+        }
+
+        checkQueued = true;
+
+        // Collapse rapid History API changes into one check.
+        queueMicrotask(() => {
+            checkQueued = false;
+            tryRedirect();
+        });
+    }
+
+    function wrappedPushState(...args) {
+        const result =
+            originalPushState.apply(this, args);
+
+        scheduleCheck();
+
         return result;
-    };
+    }
 
-    history.replaceState = function (...args) {
-        const result = originalReplaceState.apply(this, args);
-        onUrlChange();
+    function wrappedReplaceState(...args) {
+        const result =
+            originalReplaceState.apply(this, args);
+
+        scheduleCheck();
+
         return result;
-    };
+    }
 
-    window.addEventListener("popstate", onUrlChange, { passive: true });
-    window.addEventListener("hashchange", onUrlChange, { passive: true });
+    // Watch Google Maps SPA navigation.
+    try {
+        history.pushState = wrappedPushState;
+        history.replaceState = wrappedReplaceState;
+    } catch (_) {}
 
-    // Initial check.
+    window.addEventListener(
+        'popstate',
+        scheduleCheck,
+        { passive: true }
+    );
+
+    window.addEventListener(
+        'hashchange',
+        scheduleCheck,
+        { passive: true }
+    );
+
+    // Check immediately before allocating fallback timers.
+    // If this redirects successfully, no timers are created.
     tryRedirect();
 
-    // Poll periodically in case Google updates the URL asynchronously.
-    interval = setInterval(tryRedirect, 500);
+    if (!done) {
+        // Lightweight fallback for URL changes not caught by
+        // History API, popstate, or hashchange events.
+        intervalId = setInterval(
+            tryRedirect,
+            POLL_INTERVAL
+        );
 
-    // Watch for DOM changes that often accompany URL updates.
-    observer = new MutationObserver(tryRedirect);
-
-    observer.observe(document.documentElement, {
-        childList: true,
-        subtree: true
-    });
-
-    // Safety cleanup after two minutes if no redirect occurred.
-    setTimeout(stop, 120000);
-
+        // Preserve the original two-minute monitoring limit.
+        timeoutId = setTimeout(
+            stop,
+            MAX_LIFETIME
+        );
+    }
 })();
