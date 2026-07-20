@@ -1,942 +1,620 @@
 // ==UserScript==
 // @name         DeArrow Titles YouTube
-// @match        https://youtube.com/*
 // @match        https://*.youtube.com/*
+// @run-at       document-start
 // ==/UserScript==
 (() => {
-    'use strict';
+  "use strict";
 
-    const API = 'https://sponsor.ajay.app';
+  // API endpoints and general limits.
+  const BRANDING_API = "https://sponsor.ajay.app";
+  const FAST_TITLE_API = "https://dearrow-thumb.ajay.app";
+  const VIDEO_LINK_SELECTOR =
+    'a[href*="/watch?v="],a[href^="/shorts/"],a[href*="/embed/"]';
+  const CACHE_LIMIT = 600;
+  const RECOVERY_INTERVAL = 1e4;
 
-    const LINK_SELECTOR =
-        'a[href*="/watch?v="],' +
-        'a[href^="/shorts/"],' +
-        'a[href*="/embed/"]';
+  // Title caches and request-tracking collections:
+  // titleCache: DeArrow titles; appliedTitleCache: titles already applied to links;
+  // brandingRequests/watchTitleRequests: in-flight API requests;
+  // linkState: per-link state; pendingRoots: changed DOM roots.
+  const titleCache = new Map();
+  const appliedTitleCache = new Map();
+  const brandingRequests = new Map();
+  const watchTitleRequests = new Map();
+  const linkState = new WeakMap();
+  const pendingRoots = new Set();
 
-    const CACHE_LIMIT = 600;
+  let fullScanTimer = 0;
+  let fullScanDueAt = Infinity;
+  let watchUpdateTimer = 0;
+  let watchUpdateDueAt = Infinity;
+  let mutationBatchTimer = 0;
+  let mutationRecoveryTimer = 0;
+  let recoveryTimer = 0;
+  let documentObserver = null;
+  let titleObserver = null;
+  let observedTitleElement = null;
+  let headingObserver = null;
+  let observedHeading = null;
+  let clickedTitle = null;
+  let clickRetryInterval = 0;
 
-    // Retain a low-frequency full scan as a safety net for unusual
-    // YouTube DOM updates that do not produce useful incremental signals.
-    const RECOVERY_INTERVAL = 10000;
+  // Extract a YouTube video ID from watch, Shorts, or embed URLs.
+  function getVideoId(x) {
+    try {
+      const u = new URL(x, location.href);
+      if (u.pathname === "/watch") return u.searchParams.get("v");
+      if (u.pathname.startsWith("/shorts/"))
+        return u.pathname.split("/")[2] || null;
+      if (u.pathname.startsWith("/embed/"))
+        return u.pathname.split("/")[2] || null;
+    } catch {}
+    return null;
+  }
 
-    // Positive DeArrow title cache.
-    const titleCache = new Map();
+  // Normalize a DeArrow title before inserting it into the page.
+  function cleanTitle(t) {
+    return (t || "")
+      .replace(/[<>‹›]/g, "")
+      .replace(/\s+/g, " ")
+      .trim();
+  }
 
-    // Deduplicates concurrent requests for the same video.
-    const pendingRequests = new Map();
+  // Read from the title cache and refresh the entry's LRU position.
+  function getCachedTitle(v) {
+    if (!titleCache.has(v)) return;
+    const t = titleCache.get(v);
+    titleCache.delete(v);
+    titleCache.set(v, t);
+    return t;
+  }
 
-    // Remembers titles already applied to individual anchor elements.
-    // WeakMap avoids retaining detached YouTube DOM nodes.
-    const linkState = new WeakMap();
+  // Store a title (including null results) in the bounded LRU cache.
+  function putCachedTitle(v, t) {
+    titleCache.has(v) && titleCache.delete(v);
+    titleCache.set(v, t);
+    titleCache.size > CACHE_LIMIT &&
+      titleCache.delete(titleCache.keys().next().value);
+  }
 
-    // Reuse one encoder rather than allocating one per hash.
-    const textEncoder = new TextEncoder();
+  // Remember titles applied to links so a click can update the watch page early.
+  function rememberAppliedTitle(v, t) {
+    appliedTitleCache.has(v) && appliedTitleCache.delete(v);
+    appliedTitleCache.set(v, t);
+    appliedTitleCache.size > CACHE_LIMIT &&
+      appliedTitleCache.delete(appliedTitleCache.keys().next().value);
+  }
 
-    // Full-scan scheduler state.
-    let fullScanTimer = 0;
-    let fullScanDueAt = Infinity;
-
-    // Current-watch-page scheduler state.
-    let watchTimer = 0;
-    let watchDueAt = Infinity;
-
-    // Incremental mutation-batch scheduler state.
-    let mutationTimer = 0;
-    let mutationRecoveryTimer = 0;
-
-    // Low-frequency safety-net timer.
-    let recoveryTimer = 0;
-
-    // Observers.
-    let domObserver = null;
-
-    let titleObserver = null;
-    let observedTitleElement = null;
-
-    let headingObserver = null;
-    let observedHeadingElement = null;
-
-    // Added DOM roots waiting for one batched incremental scan.
-    const pendingRoots = new Set();
-
-    function getVideoId(input) {
-        try {
-            const url = new URL(input, location.href);
-
-            if (url.pathname === '/watch') {
-                return url.searchParams.get('v');
-            }
-
-            if (url.pathname.startsWith('/shorts/')) {
-                return url.pathname.split('/')[2] || null;
-            }
-
-            if (url.pathname.startsWith('/embed/')) {
-                return url.pathname.split('/')[2] || null;
-            }
-        } catch (_) {
-            // Ignore malformed or transient URLs.
-        }
-
+  // Fetch the preferred non-original title from the full DeArrow API.
+  // Concurrent requests for the same video share one promise.
+  async function fetchBrandingTitle(v) {
+    if (!v) return null;
+    const c = getCachedTitle(v);
+    if (c !== undefined) return c;
+    if (brandingRequests.has(v)) return brandingRequests.get(v);
+    const p = (async () => {
+      try {
+        const r = await fetch(
+          `${BRANDING_API}/api/branding?videoID=${encodeURIComponent(v)}`,
+          { credentials: "omit" },
+        );
+        if (!r.ok) return null;
+        const x = await r.json();
+        if (!x || !Array.isArray(x.titles))
+          return (putCachedTitle(v, null), null);
+        const b = x.titles.find(
+            (t) =>
+              t &&
+              t.title &&
+              t.original !== true &&
+              (t.locked || Number(t.votes) >= 0),
+          ),
+          o = b ? cleanTitle(b.title) : null;
+        return (putCachedTitle(v, o), o);
+      } catch {
         return null;
+      } finally {
+        brandingRequests.delete(v);
+      }
+    })();
+    brandingRequests.set(v, p);
+    return p;
+  }
+
+  // Fast-path lookup: the thumbnail endpoint exposes the title in a header, so
+  // the response body can be cancelled immediately.
+  async function fetchFastTitle(v) {
+    if (!v) return null;
+    try {
+      const r = await fetch(
+          `${FAST_TITLE_API}/api/v1/getThumbnail?videoID=${encodeURIComponent(v)}`,
+          { credentials: "omit", cache: "force-cache" },
+        ),
+        t = cleanTitle(r.headers.get("X-Title"));
+      r.body?.cancel().catch(() => {});
+      return t || null;
+    } catch {
+      return null;
     }
+  }
 
-    async function sha256(value) {
-        const digest = await crypto.subtle.digest(
-            'SHA-256',
-            textEncoder.encode(value)
-        );
+  // Resolve the current watch-page title through the fast endpoint first,
+  // falling back to the complete branding response when needed.
+  async function getWatchTitle(v) {
+    if (!v) return null;
+    const c = getCachedTitle(v);
+    if (c !== undefined) return c;
+    if (watchTitleRequests.has(v)) return watchTitleRequests.get(v);
+    const p = (async () => {
+      const t = await fetchFastTitle(v);
+      return t ? (putCachedTitle(v, t), t) : fetchBrandingTitle(v);
+    })().finally(() => watchTitleRequests.delete(v));
+    watchTitleRequests.set(v, p);
+    return p;
+  }
 
-        let hex = '';
+  // Thumbnail containers are deliberately excluded from title-text searches.
+  function isThumbnailElement(e) {
+    return !!e.closest?.(
+      "ytd-thumbnail,ytm-thumbnail,yt-thumbnail-view-model,a#thumbnail,a.ytd-thumbnail,.thumbnail,.yt-thumbnail-view-model,.media-item-thumbnail-container,.compact-media-item-image,ytm-thumbnail-overlay-time-status-renderer",
+    );
+  }
 
-        for (const byte of new Uint8Array(digest)) {
-            hex += byte.toString(16).padStart(2, '0');
-        }
+  // Reject elements whose descendants are visual media rather than title text.
+  function hasVisualDescendant(e) {
+    return !!e.querySelector?.(
+      "img,picture,image,svg,ytd-thumbnail,ytm-thumbnail,yt-thumbnail-view-model,video,canvas",
+    );
+  }
 
-        return hex;
-    }
+  // YouTube often keeps old renderers in the DOM; only visible elements count.
+  function isVisible(e) {
+    if (!e || !(e instanceof Element)) return false;
+    const s = getComputedStyle(e),
+      r = e.getBoundingClientRect();
+    return (
+      s.display !== "none" &&
+      s.visibility !== "hidden" &&
+      Number(s.opacity) !== 0 &&
+      r.width > 0 &&
+      r.height > 0
+    );
+  }
 
-    function cleanTitle(title) {
-        return (title || '')
-            .replace(/‹/g, '<')
-            .replace(/\s+/g, ' ')
-            .trim();
-    }
+  // Filter metadata-like text such as durations, view counts, and badges.
+  function isMetadataText(t) {
+    const v = (t || "").trim();
+    return (
+      !v ||
+      v.length < 3 ||
+      /^\d+([:.]\d+)+$/.test(v) ||
+      /^\d+[KMB]?\s+views?/i.test(v) ||
+      /^\d+\s+(second|minute|hour|day|week|month|year)s?\s+ago$/i.test(v) ||
+      /^(live|new|cc|hd|4k)$/i.test(v)
+    );
+  }
 
-    function getCachedTitle(videoId) {
-        if (!titleCache.has(videoId)) {
-            return undefined;
-        }
-
-        const title = titleCache.get(videoId);
-
-        // Refresh insertion order so this behaves as an LRU cache.
-        titleCache.delete(videoId);
-        titleCache.set(videoId, title);
-
-        return title;
-    }
-
-    function cacheTitle(videoId, title) {
-        if (titleCache.has(videoId)) {
-            titleCache.delete(videoId);
-        }
-
-        titleCache.set(videoId, title);
-
-        if (titleCache.size > CACHE_LIMIT) {
-            titleCache.delete(
-                titleCache.keys().next().value
-            );
-        }
-    }
-
-    async function getTitle(videoId) {
-        if (!videoId) {
-            return null;
-        }
-
-        const cached = getCachedTitle(videoId);
-
-        if (cached !== undefined) {
-            return cached;
-        }
-
-        // Reuse an existing in-flight request for this video.
-        if (pendingRequests.has(videoId)) {
-            return pendingRequests.get(videoId);
-        }
-
-        const request = (async () => {
-            try {
-                const hashPrefix = (
-                    await sha256(videoId)
-                ).slice(0, 4);
-
-                const response = await fetch(
-                    `${API}/api/branding/${hashPrefix}?fetchAll=true`,
-                    {
-                        credentials: 'omit'
-                    }
-                );
-
-                if (!response.ok) {
-                    return null;
-                }
-
-                const data = await response.json();
-                const entry = data && data[videoId];
-
-                if (
-                    !entry ||
-                    !Array.isArray(entry.titles)
-                ) {
-                    return null;
-                }
-
-                // Preserve the original title-selection behavior.
-                const candidate = entry.titles.find((item) =>
-                    item &&
-                    item.title &&
-                    item.original !== true &&
-                    (
-                        item.locked ||
-                        Number(item.votes) >= 0
-                    )
-                );
-
-                const title = candidate
-                    ? cleanTitle(candidate.title)
-                    : null;
-
-                if (title) {
-                    cacheTitle(videoId, title);
-                }
-
-                return title;
-            } catch (_) {
-                return null;
-            } finally {
-                pendingRequests.delete(videoId);
-            }
-        })();
-
-        pendingRequests.set(videoId, request);
-
-        return request;
-    }
-
-    function isInsideThumbnail(element) {
-        return Boolean(
-            element.closest?.(
-                'ytd-thumbnail,' +
-                'ytm-thumbnail,' +
-                'yt-thumbnail-view-model,' +
-                'a#thumbnail,' +
-                'a.ytd-thumbnail,' +
-                '.thumbnail,' +
-                '.yt-thumbnail-view-model,' +
-                '.media-item-thumbnail-container,' +
-                '.compact-media-item-image,' +
-                'ytm-thumbnail-overlay-time-status-renderer'
-            )
-        );
-    }
-
-    function hasVisualContent(element) {
-        return Boolean(
-            element.querySelector?.(
-                'img,' +
-                'picture,' +
-                'image,' +
-                'svg,' +
-                'ytd-thumbnail,' +
-                'ytm-thumbnail,' +
-                'yt-thumbnail-view-model,' +
-                'video,' +
-                'canvas'
-            )
-        );
-    }
-
-    function isVisible(element) {
+  // Find the most likely title node inside a video link. Headings and spans
+  // receive a small score bonus to avoid selecting adjacent metadata.
+  function findLinkTitleNode(a) {
+    if (!a || isThumbnailElement(a) || hasVisualDescendant(a) || !isVisible(a))
+      return null;
+    let b = null,
+      s = 0;
+    const w = document.createTreeWalker(a, NodeFilter.SHOW_ELEMENT, {
+      acceptNode: (n) => {
         if (
-            !element ||
-            !(element instanceof Element)
-        ) {
-            return false;
-        }
-
-        const style = getComputedStyle(element);
-        const rect = element.getBoundingClientRect();
-
-        return (
-            style.display !== 'none' &&
-            style.visibility !== 'hidden' &&
-            Number(style.opacity) !== 0 &&
-            rect.width > 0 &&
-            rect.height > 0
-        );
+          !(n instanceof Element) ||
+          isThumbnailElement(n) ||
+          hasVisualDescendant(n) ||
+          !isVisible(n)
+        )
+          return NodeFilter.FILTER_REJECT;
+        return isMetadataText((n.textContent || "").trim())
+          ? NodeFilter.FILTER_SKIP
+          : NodeFilter.FILTER_ACCEPT;
+      },
+    });
+    for (let n = w.currentNode; n; n = w.nextNode()) {
+      const t = (n.textContent || "").trim();
+      if (isMetadataText(t)) continue;
+      let q = t.length;
+      /^H[1-6]$/.test(n.tagName) && (q += 200);
+      n.tagName === "SPAN" && (q += 20);
+      if (q > s) {
+        s = q;
+        b = n;
+      }
     }
+    return b;
+  }
 
-    function isBadText(text) {
-        const value = (text || '').trim();
+  // Keep tooltip and accessibility labels synchronized with the visible title.
+  function updateLinkMetadata(a, t) {
+    if (!a || !t || isThumbnailElement(a)) return;
+    a.title !== undefined && a.title !== t && (a.title = t);
+    a.ariaLabel !== undefined && a.ariaLabel !== t && (a.ariaLabel = t);
+    a.getAttribute?.("aria-label") &&
+      a.getAttribute("aria-label") !== t &&
+      a.setAttribute("aria-label", t);
+  }
 
-        return (
-            !value ||
-            value.length < 3 ||
-            /^\d+([:.]\d+)+$/.test(value) ||
-            /^\d+[KMB]?\s+views?/i.test(value) ||
-            /^\d+\s+(second|minute|hour|day|week|month|year)s?\s+ago$/i.test(value) ||
-            /^(live|new|cc|hd|4k)$/i.test(value)
-        );
+  // Apply a resolved title only if the link is still connected and still points
+  // to the same video (important because YouTube reuses DOM nodes).
+  function applyLinkTitle(a, v, t) {
+    if (
+      !a.isConnected ||
+      getVideoId(a.href) !== v ||
+      isThumbnailElement(a) ||
+      hasVisualDescendant(a)
+    )
+      return;
+    const g = findLinkTitleNode(a);
+    if (!g) return;
+    (g.textContent || "").trim() !== t && (g.textContent = t);
+    updateLinkMetadata(a, t);
+    linkState.set(a, { videoId: v, title: t });
+    rememberAppliedTitle(v, t);
+  }
+
+  // Resolve and update one watch/Shorts/embed link.
+  async function processLink(a) {
+    if (!(a instanceof HTMLAnchorElement)) return;
+    const v = getVideoId(a.href);
+    if (!v || isThumbnailElement(a) || hasVisualDescendant(a)) return;
+    const p = linkState.get(a);
+    if (p && p.videoId === v && p.title) {
+      applyLinkTitle(a, v, p.title);
+      return;
     }
+    const t = await fetchBrandingTitle(v);
+    t && applyLinkTitle(a, v, t);
+  }
 
-    function findTextTarget(anchor) {
-        if (
-            !anchor ||
-            isInsideThumbnail(anchor) ||
-            hasVisualContent(anchor) ||
-            !isVisible(anchor)
-        ) {
-            return null;
-        }
+  // A watch-page heading must be visible, text-like, and near the viewport top.
+  function isLikelyHeading(e) {
+    if (!isVisible(e) || isThumbnailElement(e) || hasVisualDescendant(e))
+      return false;
+    const t = (e.textContent || "").trim();
+    if (isMetadataText(t)) return false;
+    const r = e.getBoundingClientRect();
+    return r.top >= 0 && r.top < innerHeight * 0.75;
+  }
 
-        let best = null;
-        let bestScore = 0;
+  // Reapply the DeArrow title if YouTube rewrites the current heading.
+  function observeHeading(e) {
+    if (!e || e === observedHeading) return;
+    headingObserver && headingObserver.disconnect();
+    observedHeading = e;
+    headingObserver = new MutationObserver(() => scheduleWatchUpdate(0));
+    headingObserver.observe(e, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+  }
 
-        const walker = document.createTreeWalker(
-            anchor,
-            NodeFilter.SHOW_ELEMENT,
-            {
-                acceptNode(node) {
-                    if (
-                        !(node instanceof Element) ||
-                        isInsideThumbnail(node) ||
-                        hasVisualContent(node) ||
-                        !isVisible(node)
-                    ) {
-                        return NodeFilter.FILTER_REJECT;
-                    }
+  // Apply a title to both the desktop watch-page heading and browser-tab title.
+  // Candidate headings are scored so the active video's title wins.
+  function applyDesktopWatchTitle(v, t) {
+    if (!t || getVideoId(location.href) !== v) return false;
+    const d = `${t} - YouTube`;
+    document.title !== d && (document.title = d);
+    let b = null,
+      s = 0;
+    document.querySelectorAll("h1,h2").forEach((e) => {
+      if (!isLikelyHeading(e)) return;
+      let q =
+          (e.textContent || "").trim().length + (e.tagName === "H1" ? 100 : 50),
+        r = e.getBoundingClientRect();
+      q += Math.max(0, 300 - r.top);
+      if (q > s) {
+        s = q;
+        b = e;
+      }
+    });
+    if (!b) return false;
+    const e = b.querySelector("yt-formatted-string") || b;
+    observeHeading(e);
+    const n = [...e.childNodes].find((n) => n.nodeType === Node.TEXT_NODE);
+    if (!n) return false;
+    (n.data || "").trim() !== t && (n.data = t);
+    return true;
+  }
 
-                    const text =
-                        (node.textContent || '').trim();
+  // Apply the title to the mobile watch-page heading. Mobile YouTube nests the
+  // visible title across attributed-string text nodes, so replace the first
+  // meaningful node and clear any remaining fragments.
+  function applyMobileWatchTitle(v, t) {
+    if (!t || getVideoId(location.href) !== v) return false;
 
-                    return isBadText(text)
-                        ? NodeFilter.FILTER_SKIP
-                        : NodeFilter.FILTER_ACCEPT;
-                }
-            }
-        );
+    const d = `${t} - YouTube`;
+    document.title !== d && (document.title = d);
 
-        for (
-            let node = walker.currentNode;
-            node;
-            node = walker.nextNode()
-        ) {
-            const text =
-                (node.textContent || '').trim();
+    const b = document.querySelector(".slim-video-information-title");
+    if (!b) return false;
 
-            if (isBadText(text)) {
-                continue;
-            }
+    const e =
+      b.querySelector(
+        ".ytAttributedStringHost:not(.cbCustomTitle),.yt-core-attributed-string:not(.cbCustomTitle),yt-formatted-string:not(.cbCustomTitle)",
+      ) || b;
+    observeHeading(e);
 
-            let score = text.length;
-
-            if (/^H[1-6]$/.test(node.tagName)) {
-                score += 200;
-            }
-
-            if (node.tagName === 'SPAN') {
-                score += 20;
-            }
-
-            if (score > bestScore) {
-                bestScore = score;
-                best = node;
-            }
-        }
-
-        return best;
+    const w = document.createTreeWalker(e, NodeFilter.SHOW_TEXT);
+    const a = [];
+    for (let n = w.nextNode(); n; n = w.nextNode()) {
+      if ((n.data || "").trim()) a.push(n);
     }
+    if (!a.length) return false;
 
-    function updateMetadata(anchor, title) {
-        if (
-            !anchor ||
-            !title ||
-            isInsideThumbnail(anchor)
-        ) {
-            return;
-        }
-
-        if (
-            anchor.title !== undefined &&
-            anchor.title !== title
-        ) {
-            anchor.title = title;
-        }
-
-        if (
-            anchor.ariaLabel !== undefined &&
-            anchor.ariaLabel !== title
-        ) {
-            anchor.ariaLabel = title;
-        }
-
-        if (
-            anchor.getAttribute?.('aria-label') &&
-            anchor.getAttribute('aria-label') !== title
-        ) {
-            anchor.setAttribute(
-                'aria-label',
-                title
-            );
-        }
+    if ((e.textContent || "").trim() !== t) {
+      a[0].data = t;
+      for (let i = 1; i < a.length; i++) a[i].data = "";
     }
+    return true;
+  }
 
-    function applyLinkTitle(
-        anchor,
-        videoId,
-        title
-    ) {
-        // Recheck after async work because YouTube frequently recycles
-        // existing anchors for different videos.
-        if (
-            !anchor.isConnected ||
-            getVideoId(anchor.href) !== videoId ||
-            isInsideThumbnail(anchor) ||
-            hasVisualContent(anchor)
-        ) {
-            return;
-        }
+  // Keep desktop and mobile title replacement paths independent.
+  function applyCurrentWatchTitle(v, t) {
+    return location.hostname === "m.youtube.com"
+      ? applyMobileWatchTitle(v, t)
+      : applyDesktopWatchTitle(v, t);
+  }
 
-        const target = findTextTarget(anchor);
-
-        if (!target) {
-            return;
-        }
-
-        if (
-            (target.textContent || '').trim() !== title
-        ) {
-            target.textContent = title;
-        }
-
-        updateMetadata(anchor, title);
-
-        linkState.set(anchor, {
-            videoId,
-            title
-        });
+  // Resolve and update the current watch page, using the clicked link's cached
+  // title when available to avoid briefly showing YouTube's original title.
+  function updateWatchPage() {
+    const v = getVideoId(location.href);
+    if (!v) {
+      headingObserver && headingObserver.disconnect();
+      headingObserver = null;
+      observedHeading = null;
+      return;
     }
-
-    async function processLink(anchor) {
-        if (
-            !(anchor instanceof HTMLAnchorElement)
-        ) {
-            return;
-        }
-
-        const videoId = getVideoId(anchor.href);
-
-        if (
-            !videoId ||
-            isInsideThumbnail(anchor) ||
-            hasVisualContent(anchor)
-        ) {
-            return;
-        }
-
-        const previous = linkState.get(anchor);
-
-        // Reapply a known title immediately if YouTube has rerendered
-        // the text inside an existing anchor.
-        if (
-            previous &&
-            previous.videoId === videoId &&
-            previous.title
-        ) {
-            applyLinkTitle(
-                anchor,
-                videoId,
-                previous.title
-            );
-
-            return;
-        }
-
-        const title = await getTitle(videoId);
-
-        if (!title) {
-            return;
-        }
-
-        applyLinkTitle(
-            anchor,
-            videoId,
-            title
-        );
+    if (observedHeading && !observedHeading.isConnected) {
+      headingObserver && headingObserver.disconnect();
+      headingObserver = null;
+      observedHeading = null;
     }
-
-    function isLikelyWatchHeading(element) {
-        if (
-            !isVisible(element) ||
-            isInsideThumbnail(element) ||
-            hasVisualContent(element)
-        ) {
-            return false;
-        }
-
-        const text =
-            (element.textContent || '').trim();
-
-        if (isBadText(text)) {
-            return false;
-        }
-
-        const rect =
-            element.getBoundingClientRect();
-
-        return (
-            rect.top >= 0 &&
-            rect.top < innerHeight * 0.75
-        );
+    const t =
+      clickedTitle && clickedTitle.videoId === v
+        ? clickedTitle.title
+        : (appliedTitleCache.get(v) ?? getCachedTitle(v));
+    if (t !== undefined) {
+      t && applyCurrentWatchTitle(v, t);
+      return;
     }
+    getWatchTitle(v).then((t) => t && applyCurrentWatchTitle(v, t));
+  }
 
-    function observeWatchHeading(element) {
-        if (
-            !element ||
-            element === observedHeadingElement
-        ) {
-            return;
-        }
+  // Scan a DOM root for video links.
+  function scanLinks(r = document) {
+    r instanceof HTMLAnchorElement &&
+      r.matches(VIDEO_LINK_SELECTOR) &&
+      processLink(r);
+    r.querySelectorAll?.(VIDEO_LINK_SELECTOR).forEach(processLink);
+  }
 
-        if (headingObserver) {
-            headingObserver.disconnect();
-        }
+  // Run a complete link scan and update the active watch page.
+  function scanPage(r = document) {
+    scanLinks(r);
+    scheduleWatchUpdate(0);
+  }
 
-        observedHeadingElement = element;
+  // Coalesce full-page scans, while allowing an earlier request to supersede a
+  // later one.
+  function scheduleFullScan(d = 250) {
+    const n = performance.now() + d;
+    if (fullScanTimer && n >= fullScanDueAt) return;
+    fullScanTimer && clearTimeout(fullScanTimer);
+    fullScanDueAt = n;
+    fullScanTimer = setTimeout(
+      () => {
+        fullScanTimer = 0;
+        fullScanDueAt = Infinity;
+        scanPage();
+      },
+      Math.max(0, n - performance.now()),
+    );
+  }
 
-        // Narrow observer replaces the old permanent 2.5-second
-        // watch-page polling loop.
-        headingObserver = new MutationObserver(() => {
-            scheduleWatch(0);
-        });
+  // Coalesce watch-page title updates independently from link scans.
+  function scheduleWatchUpdate(d = 0) {
+    const n = performance.now() + d;
+    if (watchUpdateTimer && n >= watchUpdateDueAt) return;
+    watchUpdateTimer && clearTimeout(watchUpdateTimer);
+    watchUpdateDueAt = n;
+    watchUpdateTimer = setTimeout(
+      () => {
+        watchUpdateTimer = 0;
+        watchUpdateDueAt = Infinity;
+        updateWatchPage();
+      },
+      Math.max(0, n - performance.now()),
+    );
+  }
 
-        headingObserver.observe(element, {
-            childList: true,
-            subtree: true,
-            characterData: true
-        });
+  // Queue a changed DOM root for a small batched scan.
+  function queueMutationRoot(r) {
+    if (!(r instanceof Element)) return;
+    pendingRoots.add(r);
+    if (!mutationBatchTimer)
+      mutationBatchTimer = setTimeout(flushMutationRoots, 50);
+  }
+
+  // Remove nested/duplicate mutation roots, then scan only the smallest useful
+  // set of changed subtrees.
+  function flushMutationRoots() {
+    mutationBatchTimer = 0;
+    const a = [...pendingRoots];
+    pendingRoots.clear();
+    const m = [];
+    for (const r of a) {
+      if (!r.isConnected) continue;
+      if (m.some((p) => p.contains(r))) continue;
+      for (let i = m.length - 1; i >= 0; i--)
+        r.contains(m[i]) && m.splice(i, 1);
+      m.push(r);
     }
+    for (const r of m) scanLinks(r);
+    scheduleWatchUpdate(0);
+  }
 
-    async function processWatch() {
-        const videoId =
-            getVideoId(location.href);
+  // Observe replacement of the document's <title> node during SPA navigation.
+  function observeDocumentTitle() {
+    const e = document.querySelector("title");
+    if (!e || e === observedTitleElement) return;
+    titleObserver && titleObserver.disconnect();
+    observedTitleElement = e;
+    titleObserver = new MutationObserver(() => scheduleWatchUpdate(0));
+    titleObserver.observe(e, {
+      childList: true,
+      subtree: true,
+      characterData: true,
+    });
+  }
 
-        if (!videoId) {
-            return;
-        }
+  // Schedule a fallback scan after a burst of DOM mutations settles.
+  function scheduleRecoveryScan() {
+    clearTimeout(mutationRecoveryTimer);
+    mutationRecoveryTimer = setTimeout(() => {
+      mutationRecoveryTimer = 0;
+      scheduleFullScan(0);
+    }, 700);
+  }
 
-        const title = await getTitle(videoId);
-
-        // Prevent an old async result from affecting a newly
-        // navigated video.
-        if (
-            !title ||
-            getVideoId(location.href) !== videoId
-        ) {
-            return;
-        }
-
-        const documentTitle =
-            `${title} - YouTube`;
-
-        if (document.title !== documentTitle) {
-            document.title = documentTitle;
-        }
-
-        let best = null;
-        let bestScore = 0;
-
-        document
-            .querySelectorAll('h1,h2')
-            .forEach((element) => {
-                if (
-                    !isLikelyWatchHeading(element)
-                ) {
-                    return;
-                }
-
-                let score =
-                    (element.textContent || '')
-                        .trim()
-                        .length +
-                    (
-                        element.tagName === 'H1'
-                            ? 100
-                            : 50
-                    );
-
-                const rect =
-                    element.getBoundingClientRect();
-
-                score += Math.max(
-                    0,
-                    300 - rect.top
-                );
-
-                if (score > bestScore) {
-                    bestScore = score;
-                    best = element;
-                }
-            });
-
-        if (best) {
-            observeWatchHeading(best);
-
-            if (
-                (best.textContent || '').trim() !== title
-            ) {
-                best.textContent = title;
-            }
+  // Main document observer callback: queue changed links/subtrees and reconnect
+  // the <title> observer if YouTube replaced that element.
+  function handleMutations(ms) {
+    let tc = false;
+    for (const m of ms) {
+      if (m.type === "attributes" && m.target instanceof HTMLAnchorElement) {
+        queueMutationRoot(m.target);
+        continue;
+      }
+      for (const n of m.addedNodes)
+        if (n instanceof Element) {
+          queueMutationRoot(n);
+          (n.tagName === "TITLE" || n.querySelector?.("title")) && (tc = true);
         }
     }
+    tc && observeDocumentTitle();
+    scheduleRecoveryScan();
+  }
 
-    function scanLinks(root = document) {
-        // Handle a root that is itself a matching anchor.
-        if (
-            root instanceof HTMLAnchorElement &&
-            root.matches(LINK_SELECTOR)
-        ) {
-            processLink(root);
-        }
+  // Schedule both thumbnail-link and watch-page work after navigation events.
+  function scheduleNavigationUpdate(d = 350) {
+    scheduleFullScan(d);
+    scheduleWatchUpdate(d);
+  }
 
-        root
-            .querySelectorAll?.(LINK_SELECTOR)
-            .forEach(processLink);
+  // Periodic low-frequency recovery scan for UI changes without useful events.
+  function runRecoveryLoop() {
+    clearTimeout(recoveryTimer);
+    recoveryTimer = setTimeout(() => {
+      document.hidden || scheduleFullScan(0);
+      runRecoveryLoop();
+    }, RECOVERY_INTERVAL);
+  }
+
+  // Capture the clicked thumbnail's already-resolved title and try applying it
+  // every 40 ms during navigation, stopping as soon as the new heading exists.
+  function handleLinkClick(e) {
+    const a =
+      e.target instanceof Element && e.target.closest(VIDEO_LINK_SELECTOR);
+    if (!(a instanceof HTMLAnchorElement)) return;
+    const v = getVideoId(a.href);
+    if (!v) return;
+    clearInterval(clickRetryInterval);
+    clickRetryInterval = 0;
+    clickedTitle = null;
+    const p = linkState.get(a),
+      t =
+        p && p.videoId === v
+          ? p.title
+          : (appliedTitleCache.get(v) ?? getCachedTitle(v));
+    if (!t) return;
+    clickedTitle = { videoId: v, title: t };
+    let n = 0;
+    clickRetryInterval = setInterval(() => {
+      const d = getVideoId(location.href) === v && applyCurrentWatchTitle(v, t);
+      if (d || ++n >= 75) {
+        clearInterval(clickRetryInterval);
+        clickRetryInterval = 0;
+        clickedTitle?.videoId === v && (clickedTitle = null);
+      }
+    }, 40);
+  }
+
+  // Install observers and navigation hooks once documentElement is available.
+  function start() {
+    const r = document.documentElement;
+    if (!r) {
+      setTimeout(start, 0);
+      return;
     }
-
-    function scan(root = document) {
-        scanLinks(root);
-
-        // Process the current watch page once per scan rather than
-        // once for every added subtree.
-        scheduleWatch(0);
-    }
-
-    function scheduleFullScan(delay = 250) {
-        const target =
-            performance.now() + delay;
-
-        // Keep only the earliest pending scan.
-        if (
-            fullScanTimer &&
-            target >= fullScanDueAt
-        ) {
-            return;
-        }
-
-        if (fullScanTimer) {
-            clearTimeout(fullScanTimer);
-        }
-
-        fullScanDueAt = target;
-
-        fullScanTimer = setTimeout(() => {
-            fullScanTimer = 0;
-            fullScanDueAt = Infinity;
-
-            scan();
-        }, Math.max(
-            0,
-            target - performance.now()
-        ));
-    }
-
-    function scheduleWatch(delay = 0) {
-        const target =
-            performance.now() + delay;
-
-        if (
-            watchTimer &&
-            target >= watchDueAt
-        ) {
-            return;
-        }
-
-        if (watchTimer) {
-            clearTimeout(watchTimer);
-        }
-
-        watchDueAt = target;
-
-        watchTimer = setTimeout(() => {
-            watchTimer = 0;
-            watchDueAt = Infinity;
-
-            processWatch();
-        }, Math.max(
-            0,
-            target - performance.now()
-        ));
-    }
-
-    function queueRoot(root) {
-        if (!(root instanceof Element)) {
-            return;
-        }
-
-        pendingRoots.add(root);
-
-        if (mutationTimer) {
-            return;
-        }
-
-        // Batch rapid YouTube DOM additions together.
-        mutationTimer = setTimeout(
-            flushPendingRoots,
-            50
-        );
-    }
-
-    function flushPendingRoots() {
-        mutationTimer = 0;
-
-        const roots =
-            Array.from(pendingRoots);
-
-        pendingRoots.clear();
-
-        const minimalRoots = [];
-
-        for (const root of roots) {
-            if (!root.isConnected) {
-                continue;
-            }
-
-            // Skip a root already covered by a queued parent.
-            if (
-                minimalRoots.some(
-                    (parent) => parent.contains(root)
-                )
-            ) {
-                continue;
-            }
-
-            // If this root contains previously queued children,
-            // retain only the broader root.
-            for (
-                let i = minimalRoots.length - 1;
-                i >= 0;
-                i--
-            ) {
-                if (
-                    root.contains(minimalRoots[i])
-                ) {
-                    minimalRoots.splice(i, 1);
-                }
-            }
-
-            minimalRoots.push(root);
-        }
-
-        for (const root of minimalRoots) {
-            scanLinks(root);
-        }
-
-        scheduleWatch(0);
-    }
-
-    function observeDocumentTitle() {
-        const titleElement =
-            document.querySelector('title');
-
-        if (
-            !titleElement ||
-            titleElement === observedTitleElement
-        ) {
-            return;
-        }
-
-        if (titleObserver) {
-            titleObserver.disconnect();
-        }
-
-        observedTitleElement = titleElement;
-
-        // Narrow title observation replaces repeated polling when
-        // YouTube rewrites the tab title.
-        titleObserver = new MutationObserver(() => {
-            scheduleWatch(0);
-        });
-
-        titleObserver.observe(titleElement, {
-            childList: true,
-            subtree: true,
-            characterData: true
-        });
-    }
-
-    function handleMutations(mutations) {
-        let titleElementMayHaveChanged = false;
-
-        for (const mutation of mutations) {
-            // YouTube often recycles anchors and changes only href.
-            if (
-                mutation.type === 'attributes' &&
-                mutation.target instanceof
-                    HTMLAnchorElement
-            ) {
-                queueRoot(mutation.target);
-                continue;
-            }
-
-            for (
-                const node of mutation.addedNodes
-            ) {
-                if (!(node instanceof Element)) {
-                    continue;
-                }
-
-                queueRoot(node);
-
-                if (
-                    node.tagName === 'TITLE' ||
-                    node.querySelector?.('title')
-                ) {
-                    titleElementMayHaveChanged = true;
-                }
-            }
-        }
-
-        if (titleElementMayHaveChanged) {
-            observeDocumentTitle();
-        }
-
-        scheduleMutationRecovery();
-    }
-
-    function scheduleMutationRecovery() {
-        // Incremental scans above handle normal mutations.
-        // This trailing full scan is only a safety net after
-        // the mutation burst settles.
-        clearTimeout(mutationRecoveryTimer);
-
-        mutationRecoveryTimer = setTimeout(() => {
-            mutationRecoveryTimer = 0;
-            scheduleFullScan(0);
-        }, 700);
-    }
-
-    function handleNavigation(delay = 350) {
-        scheduleFullScan(delay);
-        scheduleWatch(delay);
-    }
-
-    function startRecoveryLoop() {
-        clearTimeout(recoveryTimer);
-
-        recoveryTimer = setTimeout(() => {
-            // Avoid broad recovery work while the page is hidden.
-            if (!document.hidden) {
-                scheduleFullScan(0);
-            }
-
-            startRecoveryLoop();
-        }, RECOVERY_INTERVAL);
-    }
-
-    function start() {
-        const root =
-            document.documentElement;
-
-        if (!root) {
-            setTimeout(start, 0);
-            return;
-        }
-
-        domObserver =
-            new MutationObserver(
-                handleMutations
-            );
-
-        domObserver.observe(root, {
-            childList: true,
-            subtree: true,
-
-            // Watching href catches recycled SPA anchors without
-            // observing every attribute on the page.
-            attributes: true,
-            attributeFilter: ['href']
-        });
-
-        observeDocumentTitle();
-
-        const passiveCapture = {
-            capture: true,
-            passive: true
-        };
-
-        // Desktop YouTube navigation.
-        document.addEventListener(
-            'yt-navigate-start',
-            () => handleNavigation(100),
-            passiveCapture
-        );
-
-        document.addEventListener(
-            'yt-navigate-finish',
-            () => handleNavigation(350),
-            passiveCapture
-        );
-
-        // Mobile YouTube navigation.
-        document.addEventListener(
-            'ytm-navigate-start',
-            () => handleNavigation(100),
-            passiveCapture
-        );
-
-        document.addEventListener(
-            'ytm-navigate-finish',
-            () => handleNavigation(350),
-            passiveCapture
-        );
-
-        // Additional lifecycle signals used by different
-        // YouTube builds.
-        document.addEventListener(
-            'yt-page-data-updated',
-            () => handleNavigation(350),
-            passiveCapture
-        );
-
-        document.addEventListener(
-            'spfdone',
-            () => handleNavigation(350),
-            passiveCapture
-        );
-
-        window.addEventListener(
-            'popstate',
-            () => handleNavigation(350),
-            passiveCapture
-        );
-
-        window.addEventListener(
-            'pageshow',
-            () => handleNavigation(80),
-            passiveCapture
-        );
-
-        // Mobile YouTube may reuse its shell while changing
-        // the underlying media source.
-        document.addEventListener(
-            'loadedmetadata',
-            () => handleNavigation(80),
-            true
-        );
-
-        document.addEventListener(
-            'loadeddata',
-            () => handleNavigation(80),
-            true
-        );
-
-        // Recheck immediately when returning to a foreground tab.
-        document.addEventListener(
-            'visibilitychange',
-            () => {
-                if (!document.hidden) {
-                    handleNavigation(0);
-                }
-            }
-        );
-
-        scan();
-        startRecoveryLoop();
-    }
-
-    start();
+    documentObserver = new MutationObserver(handleMutations);
+    documentObserver.observe(r, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["href"],
+    });
+    observeDocumentTitle();
+    const o = { capture: true, passive: true };
+    document.addEventListener("click", handleLinkClick, o);
+    document.addEventListener(
+      "yt-navigate-start",
+      () => scheduleNavigationUpdate(100),
+      o,
+    );
+    document.addEventListener(
+      "yt-navigate-finish",
+      () => {
+        scheduleFullScan(350);
+        scheduleWatchUpdate(0);
+      },
+      o,
+    );
+    document.addEventListener(
+      "ytm-navigate-start",
+      () => scheduleNavigationUpdate(100),
+      o,
+    );
+    document.addEventListener(
+      "ytm-navigate-finish",
+      () => scheduleNavigationUpdate(350),
+      o,
+    );
+    document.addEventListener(
+      "yt-page-data-updated",
+      () => scheduleNavigationUpdate(350),
+      o,
+    );
+    document.addEventListener(
+      "spfdone",
+      () => scheduleNavigationUpdate(350),
+      o,
+    );
+    window.addEventListener("popstate", () => scheduleNavigationUpdate(350), o);
+    window.addEventListener("pageshow", () => scheduleNavigationUpdate(80), o);
+    document.addEventListener(
+      "loadedmetadata",
+      () => scheduleNavigationUpdate(80),
+      true,
+    );
+    document.addEventListener(
+      "loadeddata",
+      () => scheduleNavigationUpdate(80),
+      true,
+    );
+    document.addEventListener("visibilitychange", () => {
+      document.hidden || scheduleNavigationUpdate(0);
+    });
+    scanPage();
+    runRecoveryLoop();
+  }
+
+  start();
 })();
