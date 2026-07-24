@@ -9,9 +9,9 @@
     /*
      * X Account Location Flags
      *
-     * Displays the country reported by X's internal AboutAccountQuery next to
-     * usernames. The script can also hide or highlight tweets from configured
-     * countries.
+     * Displays the country or region reported by X's internal AboutAccountQuery
+     * next to usernames. The script can also hide or highlight tweets from
+     * configured countries or regions.
      *
      * Design goals:
      * - Work as a normal userscript and as a Brave desktop custom scriptlet.
@@ -29,12 +29,13 @@
     /**
      * USER CONFIGURATION
      *
-     * Add country names exactly as they appear in COUNTRY_FLAGS below.
-     * Matching is case-insensitive. Aliases that use the same flag are treated
-     * as the same country, so "usa", "us", and "united states" all match.
+     * Add country or region names exactly as they appear in COUNTRY_FLAGS or
+     * REGION_MARKERS below. Matching is case-insensitive. Country aliases that
+     * use the same flag are treated as the same country, while regions remain
+     * distinct even when they share the same globe emoji.
      */
     const USER_CONFIG = {
-        // Add country names here, e.g. ['chad', 'cuba', 'russia'].
+        // Add country/region names here, e.g. ['chad', 'cuba', 'south asia'].
         BLOCKED_COUNTRIES: [],
 
         // false = completely hide blocked posts
@@ -43,10 +44,10 @@
     };
 
     const CONFIG = {
-        VERSION: '2.4.0',
+        VERSION: '2.5.3',
         CACHE_KEY: 'x_location_cache_v4',
         LEGACY_CACHE_KEYS: ['x_location_cache_v3'],
-        // Country data rarely changes. A longer persistent cache greatly reduces API usage.
+        // Location data rarely changes. A longer persistent cache greatly reduces API usage.
         CACHE_EXPIRY: 7 * 24 * 60 * 60 * 1000,
         CACHE_MAX_ENTRIES: 3000,
         CACHE_SAVE_DELAY: 750,
@@ -58,8 +59,9 @@
             RETRY_DELAY: 4000,
         },
         SELECTOR: '[data-testid="UserName"], [data-testid="User-Name"]',
-        STYLE_ID: 'x-account-location-flags-style-v240',
+        STYLE_ID: 'x-account-location-flags-style-v253',
         FLAG_CLASS: 'x-location-flag-v2',
+        TOOLTIP_CLASS: 'x-location-touch-tooltip',
         FILTER_ATTR: 'data-x-location-country-filter',
         // Start uncached lookups several screens before content enters the viewport.
         VIEWPORT_MARGIN: '1600px 0px 5000px 0px',
@@ -73,18 +75,18 @@
         "belarus": "🇧🇾", "belgium": "🇧🇪", "belize": "🇧🇿", "benin": "🇧🇯", "bhutan": "🇧🇹",
         "bolivia": "🇧🇴", "bosnia and herzegovina": "🇧🇦", "bosnia": "🇧🇦", "botswana": "🇧🇼", "brazil": "🇧🇷",
         "brunei": "🇧🇳", "bulgaria": "🇧🇬", "burkina faso": "🇧🇫", "burundi": "🇧🇮", "cambodia": "🇰🇭",
-        "cameroon": "🇨🇲", "canada": "🇨🇦", "cape verde": "🇨🇻", "central african republic": "🇨🇫", "chad": "🇹🇩",
+        "cameroon": "🇨🇲", "canada": "🇨🇦", "cape verde": "🇨🇻", "cabo verde": "🇨🇻", "central african republic": "🇨🇫", "chad": "🇹🇩",
         "chile": "🇨🇱", "china": "🇨🇳", "colombia": "🇨🇴", "comoros": "🇰🇲", "congo": "🇨🇬",
         "costa rica": "🇨🇷", "croatia": "🇭🇷", "cuba": "🇨🇺", "cyprus": "🇨🇾", "czech republic": "🇨🇿",
         "czechia": "🇨🇿", "democratic republic of the congo": "🇨🇩", "denmark": "🇩🇰", "djibouti": "🇩🇯", "dominica": "🇩🇲",
         "dominican republic": "🇩🇴", "east timor": "🇹🇱", "ecuador": "🇪🇨", "egypt": "🇪🇬", "el salvador": "🇸🇻",
         "england": "🏴󠁧󠁢󠁥󠁮󠁧󠁿", "equatorial guinea": "🇬🇶", "eritrea": "🇪🇷", "estonia": "🇪🇪", "eswatini": "🇸🇿",
-        "ethiopia": "🇪🇹", "europe": "🇪🇺", "european union": "🇪🇺", "fiji": "🇫🇯", "finland": "🇫🇮",
+        "ethiopia": "🇪🇹", "european union": "🇪🇺", "fiji": "🇫🇯", "finland": "🇫🇮",
         "france": "🇫🇷", "gabon": "🇬🇦", "gambia": "🇬🇲", "georgia": "🇬🇪", "germany": "🇩🇪",
         "ghana": "🇬🇭", "greece": "🇬🇷", "grenada": "🇬🇩", "guatemala": "🇬🇹", "guinea": "🇬🇳",
         "guinea-bissau": "🇬🇼", "guyana": "🇬🇾", "haiti": "🇭🇹", "honduras": "🇭🇳", "hong kong": "🇭🇰",
         "hungary": "🇭🇺", "iceland": "🇮🇸", "india": "🇮🇳", "indonesia": "🇮🇩", "iran": "🇮🇷",
-        "iraq": "🇮🇶", "ireland": "🇮🇪", "israel": "🇮🇱", "italy": "🇮🇹", "ivory coast": "🇨🇮",
+        "iraq": "🇮🇶", "ireland": "🇮🇪", "israel": "🇮🇱", "italy": "🇮🇹", "ivory coast": "🇨🇮", "côte d’ivoire": "🇨🇮", "côte d'ivoire": "🇨🇮", "cote d'ivoire": "🇨🇮",
         "jamaica": "🇯🇲", "japan": "🇯🇵", "jordan": "🇯🇴", "kazakhstan": "🇰🇿", "kenya": "🇰🇪",
         "kiribati": "🇰🇮", "korea": "🇰🇷", "kosovo": "🇽🇰", "kuwait": "🇰🇼", "kyrgyzstan": "🇰🇬",
         "laos": "🇱🇦", "latvia": "🇱🇻", "lebanon": "🇱🇧", "lesotho": "🇱🇸", "liberia": "🇱🇷",
@@ -113,6 +115,29 @@
         "vietnam": "🇻🇳", "wales": "🏴󠁧󠁢󠁷󠁬󠁳󠁿", "yemen": "🇾🇪", "zambia": "🇿🇲", "zimbabwe": "🇿🇼"
     };
 
+    /**
+     * X may return a broader region instead of a specific country.
+     * Regions have no Unicode flags, so a representative symbol is used instead.
+     * The blocker key is separate from the emoji because several regions share
+     * the same globe marker and must still be independently configurable.
+     */
+    const REGION_MARKERS = {
+        "east asia & pacific": ["🏯", "east asia & pacific"],
+        "europe & central asia": ["🏰", "europe & central asia"],
+        "latin america & caribbean": ["🌴", "latin america & caribbean"],
+        "middle east & north africa": ["🕌", "middle east & north africa"],
+        "north america": ["🏙️", "north america"],
+        "south asia": ["🛕", "south asia"],
+        "sub-saharan africa": ["🦁", "sub-saharan africa"],
+        "global": ["🌐", "global"],
+        "worldwide": ["🌐", "global"],
+        "europe": ["🏰", "europe"]
+    };
+
+    // Explicit markers for resolved responses that do not map to a known place.
+    const NO_LOCATION_MARKER = "❓";
+    const UNKNOWN_LOCATION_MARKER = "📍";
+
     // X application routes that can otherwise look like usernames.
     const RESERVED_PATHS = new Set([
         'home', 'explore', 'notifications', 'messages', 'search', 'settings',
@@ -139,28 +164,42 @@
             this.elementState = new WeakMap();
             this.cacheDirty = false;
             this.cacheSaveTimer = 0;
-            this.blockedFlags = this.buildBlockedFlagSet();
+            this.touchTooltip = null;
+            this.touchTooltipTimer = 0;
+            this.blockedLocationKeys = this.buildBlockedLocationSet();
             this.mutationObserver = null;
             this.intersectionObserver = null;
 
             this.loadCache();
             this.initWhenReady();
-            console.debug(`[X Location Flags] v${CONFIG.VERSION} initialized; ${this.cache.size} cached account(s) loaded.`);
         }
 
         /**
-         * Convert configured country names to flag values. Aliases sharing the
-         * same flag are therefore treated as the same country.
+         * Convert configured locations to canonical blocker keys.
+         *
+         * Country aliases sharing a flag share one blocker key, while region
+         * keys stay distinct even when their visible emoji is identical.
          */
-        buildBlockedFlagSet() {
+        buildBlockedLocationSet() {
             const blocked = new Set();
             for (const rawName of USER_CONFIG.BLOCKED_COUNTRIES) {
-                const name = normalizeCountry(rawName);
-                const flag = COUNTRY_FLAGS[name];
-                if (flag) blocked.add(flag);
-                else if (name) console.warn(`[X Location Flags] Unknown blocked country: "${rawName}"`);
+                const marker = this.getLocationMarker(rawName);
+                if (marker) blocked.add(marker.blockKey);
             }
             return blocked;
+        }
+
+        getLocationMarker(location) {
+            const key = normalizeCountry(location);
+            if (!key) return null;
+
+            const flag = COUNTRY_FLAGS[key];
+            if (flag) return { emoji: flag, blockKey: `country:${flag}` };
+
+            const region = REGION_MARKERS[key];
+            if (region) return { emoji: region[0], blockKey: `region:${region[1]}` };
+
+            return null;
         }
 
         /**
@@ -176,10 +215,23 @@
 
                 // Cache writes are already debounced after successful requests. These
                 // lifecycle hooks make persistence robust across navigation/browser exits.
-                addEventListener('pagehide', () => this.saveCache());
-                document.addEventListener('visibilitychange', () => {
-                    if (document.visibilityState === 'hidden') this.saveCache();
+                addEventListener('pagehide', () => {
+                    this.hideTouchTooltip();
+                    this.saveCache();
                 });
+                document.addEventListener('visibilitychange', () => {
+                    if (document.visibilityState === 'hidden') {
+                        this.hideTouchTooltip();
+                        this.saveCache();
+                    }
+                });
+                document.addEventListener('click', event => {
+                    if (this.touchTooltip && !event.target.closest?.(`.${CONFIG.FLAG_CLASS}`)) {
+                        this.hideTouchTooltip();
+                    }
+                }, true);
+                addEventListener('scroll', () => this.hideTouchTooltip(), { passive: true, capture: true });
+                addEventListener('resize', () => this.hideTouchTooltip(), { passive: true });
             };
 
             if (document.readyState === 'loading') {
@@ -216,6 +268,20 @@
                     opacity: 0.58;
                     cursor: wait;
                     font-size: 13px;
+                }
+                .${CONFIG.TOOLTIP_CLASS} {
+                    position: fixed;
+                    z-index: 2147483647;
+                    max-width: min(260px, calc(100vw - 24px));
+                    padding: 7px 10px;
+                    border-radius: 8px;
+                    background: rgba(15, 20, 25, 0.96);
+                    color: rgb(239, 243, 244);
+                    font: 600 13px/1.25 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                    box-shadow: 0 2px 10px rgba(0, 0, 0, 0.28);
+                    pointer-events: none;
+                    white-space: normal;
+                    text-align: center;
                 }
                 [${CONFIG.FILTER_ATTR}="hide"] {
                     display: none !important;
@@ -347,11 +413,9 @@
                 }
 
                 this.applyResult(element, state.screenName, info);
-            } catch (error) {
+            } catch {
                 state.status = 'error';
-                // Do not leave an hourglass forever after the lookup definitively fails.
                 element.querySelector(`.${CONFIG.FLAG_CLASS}[data-state="pending"]`)?.remove();
-                console.debug(`[X Location Flags] Failed to process @${state.screenName}:`, error?.message || error);
             }
         }
 
@@ -368,7 +432,7 @@
 
             // A completely hidden primary-author tweet does not need a badge rendered.
             if (!(primaryAuthor && blocked && !USER_CONFIG.HIGHLIGHT_BLOCKED_INSTEAD_OF_HIDE)) {
-                this.renderFlag(element, screenName, location, info?.locationAccurate);
+                this.renderFlag(element, screenName, location);
             } else {
                 element.querySelector(`.${CONFIG.FLAG_CLASS}`)?.remove();
             }
@@ -422,13 +486,13 @@
         }
 
         isBlockedLocation(location) {
-            if (!location || this.blockedFlags.size === 0) return false;
-            const flag = COUNTRY_FLAGS[normalizeCountry(location)];
-            return Boolean(flag && this.blockedFlags.has(flag));
+            if (!location || this.blockedLocationKeys.size === 0) return false;
+            const marker = this.getLocationMarker(location);
+            return Boolean(marker && this.blockedLocationKeys.has(marker.blockKey));
         }
 
         /**
-         * Show an hourglass while an uncached location lookup is pending.
+         * Show an hourglass while an uncached location lookup is pending; a resolved response with no location becomes ❓.
          */
         renderPending(element, screenName) {
             const existing = element.querySelector(`.${CONFIG.FLAG_CLASS}`);
@@ -448,20 +512,64 @@
         }
 
         /**
-         * Replace the pending marker with the resolved country flag.
+         * Show a touch-friendly tooltip. Desktop hover behavior still comes
+         * from the native title attribute.
          */
-        renderFlag(element, screenName, location, locationAccurate) {
-            const existing = element.querySelector(`.${CONFIG.FLAG_CLASS}`);
-            if (!location) {
-                existing?.remove();
-                return;
-            }
+        showTouchTooltip(badge, label) {
+            this.hideTouchTooltip();
 
-            const locationKey = normalizeCountry(location);
-            const accuracyKey = locationAccurate === false ? 'false' : locationAccurate === true ? 'true' : 'unknown';
+            const tooltip = document.createElement('div');
+            tooltip.className = CONFIG.TOOLTIP_CLASS;
+            tooltip.textContent = label;
+            document.body.appendChild(tooltip);
+
+            const badgeRect = badge.getBoundingClientRect();
+            const tooltipRect = tooltip.getBoundingClientRect();
+            const gap = 8;
+
+            let left = badgeRect.left + (badgeRect.width - tooltipRect.width) / 2;
+            left = Math.max(12, Math.min(left, innerWidth - tooltipRect.width - 12));
+
+            let top = badgeRect.top - tooltipRect.height - gap;
+            if (top < 8) top = badgeRect.bottom + gap;
+            top = Math.max(8, Math.min(top, innerHeight - tooltipRect.height - 8));
+
+            tooltip.style.left = `${Math.round(left)}px`;
+            tooltip.style.top = `${Math.round(top)}px`;
+
+            this.touchTooltip = tooltip;
+            this.touchTooltipTimer = setTimeout(() => this.hideTouchTooltip(), 2200);
+        }
+
+        hideTouchTooltip() {
+            if (this.touchTooltipTimer) {
+                clearTimeout(this.touchTooltipTimer);
+                this.touchTooltipTimer = 0;
+            }
+            this.touchTooltip?.remove();
+            this.touchTooltip = null;
+        }
+
+        attachTooltipInteraction(badge, label) {
+            badge.addEventListener('click', event => {
+                event.preventDefault();
+                event.stopPropagation();
+                this.showTouchTooltip(badge, label);
+            });
+        }
+
+        /**
+         * Replace the pending marker with the resolved country flag, region
+         * symbol, or an explicit marker when X has no usable location.
+         */
+        renderFlag(element, screenName, location) {
+            const existing = element.querySelector(`.${CONFIG.FLAG_CLASS}`);
+            const marker = this.getLocationMarker(location);
+            const hasLocation = typeof location === 'string' && location.trim().length > 0;
+            const locationKey = hasLocation ? normalizeCountry(location) : '__no_location__';
+
             if (existing?.dataset.state === 'resolved' &&
-                existing.dataset.locationKey === locationKey &&
-                existing.dataset.accuracy === accuracyKey) return;
+                existing.dataset.locationKey === locationKey) return;
             existing?.remove();
 
             const insertion = this.findInsertionPoint(element, screenName);
@@ -471,20 +579,35 @@
             badge.className = CONFIG.FLAG_CLASS;
             badge.dataset.state = 'resolved';
             badge.dataset.locationKey = locationKey;
-            badge.dataset.accuracy = accuracyKey;
-            badge.title = locationAccurate === false
-                ? `${location} — X reports this location may be inaccurate`
-                : location;
 
-            const flag = COUNTRY_FLAGS[locationKey] || '🌍';
-            if (this.isWindows() && flag !== '🌍') {
+            let emoji;
+            let label;
+
+            if (!hasLocation) {
+                emoji = NO_LOCATION_MARKER;
+                label = 'No location available';
+            } else if (marker) {
+                emoji = marker.emoji;
+                label = location;
+            } else {
+                // Preserve visibility if X introduces a new region/string before
+                // the lookup table is updated.
+                emoji = UNKNOWN_LOCATION_MARKER;
+                label = location;
+            }
+
+            badge.title = label;
+            badge.setAttribute('aria-label', label);
+            this.attachTooltipInteraction(badge, label);
+
+            if (this.isWindows() && this.isFlagEmoji(emoji)) {
                 const img = document.createElement('img');
-                img.src = `https://abs-0.twimg.com/emoji/v2/svg/${this.emojiCodePoints(flag)}.svg`;
-                img.alt = flag;
+                img.src = `https://abs-0.twimg.com/emoji/v2/svg/${this.emojiCodePoints(emoji)}.svg`;
+                img.alt = emoji;
                 img.referrerPolicy = 'no-referrer';
                 badge.appendChild(img);
             } else {
-                badge.textContent = flag;
+                badge.textContent = emoji;
             }
 
             insertion.target.insertBefore(badge, insertion.ref);
@@ -492,6 +615,14 @@
 
         isWindows() {
             return /Windows/i.test(navigator.userAgent || navigator.platform || '');
+        }
+
+        isFlagEmoji(emoji) {
+            const points = Array.from(emoji, char => char.codePointAt(0));
+            const regionalFlag = points.length === 2 &&
+                points.every(point => point >= 0x1F1E6 && point <= 0x1F1FF);
+            const subdivisionFlag = points.includes(0xE007F);
+            return regionalFlag || subdivisionFlag;
         }
 
         emojiCodePoints(emoji) {
@@ -613,7 +744,7 @@
         }
 
         /**
-         * Process queued API calls conservatively to reduce rate-limit pressure.
+         * Process queued requests conservatively to reduce rate-limit pressure; failures are handled silently.
          */
         async runQueue() {
             if (this.queueRunning) return;
@@ -701,13 +832,9 @@
 
             const data = await response.json();
             const profile = data?.data?.user_result_by_screen_name?.result?.about_profile;
-            const locationAccurate = typeof profile?.location_accurate === 'boolean'
-                ? profile.location_accurate
-                : null;
 
             return {
                 location: typeof profile?.account_based_in === 'string' ? profile.account_based_in : null,
-                locationAccurate,
             };
         }
 
@@ -726,12 +853,7 @@
                     for (const [screenName, entry] of Object.entries(parsed)) {
                         if (!entry || entry.expiresAt <= now || !entry.value) continue;
                         this.cache.set(normalizeScreenName(screenName), {
-                            value: {
-                                location: entry.value.location || null,
-                                locationAccurate: typeof entry.value.locationAccurate === 'boolean'
-                                    ? entry.value.locationAccurate
-                                    : null,
-                            },
+                            value: { location: entry.value.location || null },
                             fetchedAt: Number(entry.fetchedAt) || now,
                             expiresAt: Number(entry.expiresAt),
                         });
@@ -750,12 +872,7 @@
                         const key = normalizeScreenName(screenName);
                         if (this.cache.has(key) || !entry?.value || Number(entry.expiry) <= now) continue;
                         this.cache.set(key, {
-                            value: {
-                                location: entry.value.location || null,
-                                locationAccurate: typeof entry.value.locationAccurate === 'boolean'
-                                    ? entry.value.locationAccurate
-                                    : null,
-                            },
+                            value: { location: entry.value.location || null },
                             fetchedAt: now,
                             expiresAt: now + CONFIG.CACHE_EXPIRY,
                         });
@@ -768,9 +885,8 @@
                     this.cacheDirty = true;
                     this.saveCache(true);
                 }
-            } catch (error) {
-                console.debug('[X Location Flags] Cache load failed:', error);
-                try { localStorage.removeItem(CONFIG.CACHE_KEY); } catch { /* ignored */ }
+            } catch {
+                try { localStorage.removeItem(CONFIG.CACHE_KEY); } catch {}
             }
         }
 
@@ -789,12 +905,7 @@
         setCached(screenName, value) {
             const now = Date.now();
             this.cache.set(normalizeScreenName(screenName), {
-                value: {
-                    location: value?.location || null,
-                    locationAccurate: typeof value?.locationAccurate === 'boolean'
-                        ? value.locationAccurate
-                        : null,
-                },
+                value: { location: value?.location || null },
                 fetchedAt: now,
                 expiresAt: now + CONFIG.CACHE_EXPIRY,
             });
@@ -839,9 +950,7 @@
                 const data = Object.fromEntries(this.cache);
                 localStorage.setItem(CONFIG.CACHE_KEY, JSON.stringify(data));
                 this.cacheDirty = false;
-            } catch (error) {
-                console.debug('[X Location Flags] Cache save failed:', error);
-            }
+            } catch {}
         }
     }
 
