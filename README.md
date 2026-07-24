@@ -87,8 +87,12 @@ Edit the configuration section near the top of the script:
 
 ```js
 var USER_CONFIG = {
-    BLOCKED_COUNTRIES: ['cuba', 'chad'],
-    HIGHLIGHT_BLOCKED_INSTEAD_OF_HIDE: false
+    BLOCKED_COUNTRIES: ['cuba', 'chad', 'southeast asia'],
+    BLOCKED_POST_ACTION: 'hide'
+    // 'hide'      = completely removes matching posts
+    // 'highlight' = keeps matching posts visible with a red border
+    // 'dim'       = darkens matching posts until hovered
+    // 'collapse'  = replaces matching posts with a compact notice that can be clicked/tapped to reveal them
 };
 ```
 
