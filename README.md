@@ -81,6 +81,17 @@ Then paste the following into the **Create Custom Filters** box:
 x.com##+js(user-location-blocking-x.js)
 ```
 
+### Configuration
+
+Edit the configuration section near the top of the script:
+
+```js
+var USER_CONFIG = {
+    BLOCKED_COUNTRIES: ['cuba', 'chad'],
+    HIGHLIGHT_BLOCKED_INSTEAD_OF_HIDE: false
+};
+```
+
 ## Redirect Google Maps
 
 Redirects Google Maps links to the Apple Maps application.
