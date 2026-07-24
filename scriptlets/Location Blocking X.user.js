@@ -6,6 +6,11 @@
 (() => {
     'use strict';
 
+    // Brave may execute a custom scriptlet more than once on the same SPA page.
+    // Keep exactly one observer/request queue active at a time.
+    const INSTANCE_KEY = '__X_ACCOUNT_LOCATION_FLAGS_ACTIVE__';
+    if (globalThis[INSTANCE_KEY]) return;
+
     /*
      * X Account Location Flags
      *
@@ -35,20 +40,23 @@
      * distinct even when they share the same globe emoji.
      */
     const USER_CONFIG = {
-        // Add country/region names here, e.g. ['chad', 'cuba', 'south asia'].
+        // Add country/region names here, e.g. ['chad', 'cuba', 'southeast asia'].
         BLOCKED_COUNTRIES: [],
 
-        // false = completely hide blocked posts
-        // true  = keep blocked posts visible with a clearly visible red border
-        HIGHLIGHT_BLOCKED_INSTEAD_OF_HIDE: false,
+        // 'hide' = remove matching posts
+        // 'highlight' = keep them visible with a red border
+        // 'dim' = darken matching posts until hovered
+        // 'collapse' = replace them with a compact location notice that can be expanded
+        BLOCKED_POST_ACTION: 'hide',
     };
 
     const CONFIG = {
-        VERSION: '2.5.3',
+        VERSION: '2.6.1',
         CACHE_KEY: 'x_location_cache_v4',
         LEGACY_CACHE_KEYS: ['x_location_cache_v3'],
         // Location data rarely changes. A longer persistent cache greatly reduces API usage.
-        CACHE_EXPIRY: 7 * 24 * 60 * 60 * 1000,
+        CACHE_EXPIRY: 30 * 24 * 60 * 60 * 1000,
+        EMPTY_CACHE_EXPIRY: 15 * 60 * 1000,
         CACHE_MAX_ENTRIES: 3000,
         CACHE_SAVE_DELAY: 750,
         API: {
@@ -59,9 +67,10 @@
             RETRY_DELAY: 4000,
         },
         SELECTOR: '[data-testid="UserName"], [data-testid="User-Name"]',
-        STYLE_ID: 'x-account-location-flags-style-v253',
+        STYLE_ID: 'x-account-location-flags-style-v261',
         FLAG_CLASS: 'x-location-flag-v2',
         TOOLTIP_CLASS: 'x-location-touch-tooltip',
+        COLLAPSE_CLASS: 'x-location-collapse-notice',
         FILTER_ATTR: 'data-x-location-country-filter',
         // Start uncached lookups several screens before content enters the viewport.
         VIEWPORT_MARGIN: '1600px 0px 5000px 0px',
@@ -112,26 +121,54 @@
         "ukraine": "🇺🇦", "united arab emirates": "🇦🇪", "uae": "🇦🇪", "united kingdom": "🇬🇧", "uk": "🇬🇧",
         "great britain": "🇬🇧", "britain": "🇬🇧", "united states": "🇺🇸", "usa": "🇺🇸", "us": "🇺🇸",
         "uruguay": "🇺🇾", "uzbekistan": "🇺🇿", "vanuatu": "🇻🇺", "vatican city": "🇻🇦", "venezuela": "🇻🇪",
-        "vietnam": "🇻🇳", "wales": "🏴󠁧󠁢󠁷󠁬󠁳󠁿", "yemen": "🇾🇪", "zambia": "🇿🇲", "zimbabwe": "🇿🇼"
+        "vietnam": "🇻🇳", "viet nam": "🇻🇳", "wales": "🏴󠁧󠁢󠁷󠁬󠁳󠁿", "yemen": "🇾🇪", "zambia": "🇿🇲", "zimbabwe": "🇿🇼"
     };
 
     /**
      * X may return a broader region instead of a specific country.
-     * Regions have no Unicode flags, so a representative symbol is used instead.
+     * Regions have no Unicode flags, so the matching geographic globe variant is used instead.
      * The blocker key is separate from the emoji because several regions share
      * the same globe marker and must still be independently configurable.
      */
     const REGION_MARKERS = {
-        "east asia & pacific": ["🏯", "east asia & pacific"],
-        "europe & central asia": ["🏰", "europe & central asia"],
-        "latin america & caribbean": ["🌴", "latin america & caribbean"],
-        "middle east & north africa": ["🕌", "middle east & north africa"],
-        "north america": ["🏙️", "north america"],
-        "south asia": ["🛕", "south asia"],
-        "sub-saharan africa": ["🦁", "sub-saharan africa"],
+        // Asia / Pacific
+        "asia": ["🌏", "asia"],
+        "east asia": ["🌏", "east asia"],
+        "east asia & pacific": ["🌏", "east asia & pacific"],
+        "southeast asia": ["🌏", "southeast asia"],
+        "south east asia": ["🌏", "southeast asia"],
+        "south asia": ["🌏", "south asia"],
+        "west asia": ["🌏", "west asia"],
+        "western asia": ["🌏", "west asia"],
+        "central asia": ["🌏", "central asia"],
+        "north asia": ["🌏", "north asia"],
+        "oceania": ["🌏", "oceania"],
+        "pacific": ["🌏", "pacific"],
+
+        // Europe / Africa
+        "europe": ["🌍", "europe"],
+        "europe & central asia": ["🌍", "europe & central asia"],
+        "africa": ["🌍", "africa"],
+        "north africa": ["🌍", "north africa"],
+        "west africa": ["🌍", "west africa"],
+        "east africa": ["🌍", "east africa"],
+        "central africa": ["🌍", "central africa"],
+        "southern africa": ["🌍", "southern africa"],
+        "sub-saharan africa": ["🌍", "sub-saharan africa"],
+        "middle east & north africa": ["🌍", "middle east & north africa"],
+
+        // Americas
+        "americas": ["🌎", "americas"],
+        "north america": ["🌎", "north america"],
+        "central america": ["🌎", "central america"],
+        "south america": ["🌎", "south america"],
+        "latin america": ["🌎", "latin america"],
+        "latin america & caribbean": ["🌎", "latin america & caribbean"],
+        "caribbean": ["🌎", "caribbean"],
+
+        // Non-geographic
         "global": ["🌐", "global"],
-        "worldwide": ["🌐", "global"],
-        "europe": ["🏰", "europe"]
+        "worldwide": ["🌐", "global"]
     };
 
     // Explicit markers for resolved responses that do not map to a known place.
@@ -290,6 +327,37 @@
                     box-shadow: inset 0 0 0 3px rgba(244, 33, 46, 0.92) !important;
                     border-radius: 0 !important;
                 }
+                article[${CONFIG.FILTER_ATTR}="dim"] {
+                    opacity: 0.42 !important;
+                    filter: brightness(0.62) saturate(0.72) !important;
+                    transition: opacity 120ms ease, filter 120ms ease !important;
+                }
+                article[${CONFIG.FILTER_ATTR}="dim"]:hover {
+                    opacity: 1 !important;
+                    filter: none !important;
+                }
+                article[${CONFIG.FILTER_ATTR}="collapse"] {
+                    display: none !important;
+                }
+                .${CONFIG.COLLAPSE_CLASS} {
+                    width: 100%;
+                    box-sizing: border-box;
+                    padding: 10px 16px;
+                    border: 0;
+                    border-bottom: 1px solid rgba(127, 127, 127, 0.2);
+                    background: rgba(127, 127, 127, 0.055);
+                    color: inherit;
+                    opacity: 0.7;
+                    font: 500 13px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+                    text-align: left;
+                    cursor: pointer;
+                }
+                .${CONFIG.COLLAPSE_CLASS}:hover,
+                .${CONFIG.COLLAPSE_CLASS}:focus-visible {
+                    opacity: 1;
+                    background: rgba(127, 127, 127, 0.1);
+                    outline: none;
+                }
             `;
             (document.head || document.documentElement).appendChild(style);
         }
@@ -428,10 +496,11 @@
             const tweet = element.closest('article[data-testid="tweet"]');
             const primaryAuthor = tweet && this.isPrimaryTweetAuthor(element, tweet);
 
-            if (primaryAuthor) this.applyTweetFilter(tweet, blocked);
+            if (primaryAuthor) this.applyTweetFilter(tweet, blocked, location);
 
             // A completely hidden primary-author tweet does not need a badge rendered.
-            if (!(primaryAuthor && blocked && !USER_CONFIG.HIGHLIGHT_BLOCKED_INSTEAD_OF_HIDE)) {
+            const action = this.getBlockedPostAction();
+            if (!(primaryAuthor && blocked && (action === 'hide' || action === 'collapse'))) {
                 this.renderFlag(element, screenName, location);
             } else {
                 element.querySelector(`.${CONFIG.FLAG_CLASS}`)?.remove();
@@ -452,15 +521,63 @@
             if (tweet.hasAttribute(CONFIG.FILTER_ATTR)) tweet.removeAttribute(CONFIG.FILTER_ATTR);
             const cell = this.getTweetCell(tweet);
             if (cell !== tweet && cell.hasAttribute(CONFIG.FILTER_ATTR)) cell.removeAttribute(CONFIG.FILTER_ATTR);
+            cell.querySelector(`.${CONFIG.COLLAPSE_CLASS}`)?.remove();
+        }
+
+        getBlockedPostAction() {
+            const action = String(USER_CONFIG.BLOCKED_POST_ACTION || 'hide').toLowerCase();
+            return action === 'highlight' || action === 'dim' || action === 'collapse'
+                ? action
+                : 'hide';
+        }
+
+        getCollapseLabel(location, expanded = false) {
+            const marker = this.getLocationMarker(location);
+            const emoji = marker?.emoji ? `${marker.emoji} ` : '';
+            const name = typeof location === 'string' && location.trim()
+                ? location.trim()
+                : 'blocked location';
+            return expanded
+                ? `${emoji}Post from blocked location: ${name} — click to collapse`
+                : `${emoji}Post from blocked location: ${name} — click to show`;
+        }
+
+        applyCollapsedPost(tweet, location) {
+            const cell = this.getTweetCell(tweet);
+            let notice = cell.querySelector(`.${CONFIG.COLLAPSE_CLASS}`);
+            const currentState = tweet.getAttribute(CONFIG.FILTER_ATTR);
+            const expanded = currentState === 'collapse-open';
+
+            if (!notice) {
+                notice = document.createElement('button');
+                notice.type = 'button';
+                notice.className = CONFIG.COLLAPSE_CLASS;
+                cell.insertBefore(notice, cell.firstChild);
+
+                notice.addEventListener('click', event => {
+                    event.preventDefault();
+                    event.stopPropagation();
+
+                    const isOpen = tweet.getAttribute(CONFIG.FILTER_ATTR) === 'collapse-open';
+                    tweet.setAttribute(CONFIG.FILTER_ATTR, isOpen ? 'collapse' : 'collapse-open');
+                    notice.textContent = this.getCollapseLabel(location, !isOpen);
+                    notice.setAttribute('aria-expanded', String(!isOpen));
+                });
+            }
+
+            tweet.setAttribute(CONFIG.FILTER_ATTR, expanded ? 'collapse-open' : 'collapse');
+            notice.textContent = this.getCollapseLabel(location, expanded);
+            notice.setAttribute('aria-expanded', String(expanded));
         }
 
         /**
          * Apply filtering only to the tweet's primary author.
          *
          * Hidden posts remove the complete timeline cell so X's separator does
-         * not remain behind. Highlighted posts keep the article visible.
+         * not remain behind. Highlighted, dimmed, and collapsed posts remain
+         * represented in the feed.
          */
-        applyTweetFilter(tweet, blocked) {
+        applyTweetFilter(tweet, blocked, location) {
             const cell = this.getTweetCell(tweet);
 
             if (!blocked) {
@@ -468,21 +585,36 @@
                 return;
             }
 
-            if (USER_CONFIG.HIGHLIGHT_BLOCKED_INSTEAD_OF_HIDE) {
+            const action = this.getBlockedPostAction();
+
+            if (action === 'highlight') {
                 if (tweet.getAttribute(CONFIG.FILTER_ATTR) === 'highlight' &&
                     (cell === tweet || !cell.hasAttribute(CONFIG.FILTER_ATTR))) return;
                 this.clearTweetFilter(tweet);
-                // Attribute-based state survives X's hover/class re-renders much better
-                // than appending a CSS class to React-managed className values.
                 tweet.setAttribute(CONFIG.FILTER_ATTR, 'highlight');
-            } else {
-                if (cell.getAttribute(CONFIG.FILTER_ATTR) === 'hide' &&
-                    (cell === tweet || !tweet.hasAttribute(CONFIG.FILTER_ATTR))) return;
-                this.clearTweetFilter(tweet);
-                // Hide the whole timeline cell, not only the article. This also removes
-                // X's separator/border wrapper so hidden posts do not leave stacked lines.
-                cell.setAttribute(CONFIG.FILTER_ATTR, 'hide');
+                return;
             }
+
+            if (action === 'dim') {
+                if (tweet.getAttribute(CONFIG.FILTER_ATTR) === 'dim' &&
+                    (cell === tweet || !cell.hasAttribute(CONFIG.FILTER_ATTR))) return;
+                this.clearTweetFilter(tweet);
+                tweet.setAttribute(CONFIG.FILTER_ATTR, 'dim');
+                return;
+            }
+
+            if (action === 'collapse') {
+                if (cell !== tweet && cell.hasAttribute(CONFIG.FILTER_ATTR)) {
+                    cell.removeAttribute(CONFIG.FILTER_ATTR);
+                }
+                this.applyCollapsedPost(tweet, location);
+                return;
+            }
+
+            if (cell.getAttribute(CONFIG.FILTER_ATTR) === 'hide' &&
+                (cell === tweet || !tweet.hasAttribute(CONFIG.FILTER_ATTR))) return;
+            this.clearTweetFilter(tweet);
+            cell.setAttribute(CONFIG.FILTER_ATTR, 'hide');
         }
 
         isBlockedLocation(location) {
@@ -851,11 +983,19 @@
                 if (raw) {
                     const parsed = JSON.parse(raw);
                     for (const [screenName, entry] of Object.entries(parsed)) {
-                        if (!entry || entry.expiresAt <= now || !entry.value) continue;
+                        if (!entry?.value) continue;
+
+                        const location = entry.value.location || null;
+                        const fetchedAt = Number(entry.fetchedAt) || now;
+                        const lifetime = location ? CONFIG.CACHE_EXPIRY : CONFIG.EMPTY_CACHE_EXPIRY;
+                        const expiresAt = fetchedAt + lifetime;
+
+                        if (expiresAt <= now) continue;
+
                         this.cache.set(normalizeScreenName(screenName), {
-                            value: { location: entry.value.location || null },
-                            fetchedAt: Number(entry.fetchedAt) || now,
-                            expiresAt: Number(entry.expiresAt),
+                            value: { location },
+                            fetchedAt,
+                            expiresAt,
                         });
                     }
                 }
@@ -870,9 +1010,14 @@
                     try { legacy = JSON.parse(legacyRaw); } catch { continue; }
                     for (const [screenName, entry] of Object.entries(legacy)) {
                         const key = normalizeScreenName(screenName);
-                        if (this.cache.has(key) || !entry?.value || Number(entry.expiry) <= now) continue;
+                        const location = entry?.value?.location || null;
+
+                        // Do not migrate old empty results; re-query them so a temporary
+                        // missing response cannot become a long-lived false "no location".
+                        if (this.cache.has(key) || !location || Number(entry.expiry) <= now) continue;
+
                         this.cache.set(key, {
-                            value: { location: entry.value.location || null },
+                            value: { location },
                             fetchedAt: now,
                             expiresAt: now + CONFIG.CACHE_EXPIRY,
                         });
@@ -904,10 +1049,11 @@
 
         setCached(screenName, value) {
             const now = Date.now();
+            const location = value?.location || null;
             this.cache.set(normalizeScreenName(screenName), {
-                value: { location: value?.location || null },
+                value: { location },
                 fetchedAt: now,
-                expiresAt: now + CONFIG.CACHE_EXPIRY,
+                expiresAt: now + (location ? CONFIG.CACHE_EXPIRY : CONFIG.EMPTY_CACHE_EXPIRY),
             });
             this.pruneCache();
             this.markCacheDirty();
@@ -954,5 +1100,6 @@
         }
     }
 
-    new XLocationFlags();
+    const instance = new XLocationFlags();
+    globalThis[INSTANCE_KEY] = instance;
 })();
