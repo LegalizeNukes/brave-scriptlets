@@ -2,6 +2,8 @@
 // @name         SponsorBlock YouTube
 // @match        https://youtube.com/*
 // @match        https://*.youtube.com/*
+// @exclude      https://youtube.com/shorts/*
+// @exclude      https://*.youtube.com/shorts/*
 // ==/UserScript==
 (function () {
     'use strict';
